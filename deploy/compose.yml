@@ -1,0 +1,56 @@
+# BasketWise on a single EC2 box: FastAPI (read-only SQLite) behind Caddy (HTTPS +
+# static frontend). Start with deploy/scripts/up.sh, which passes the env file.
+#
+#   https://$DOMAIN/          React app      (/srv/basketwise/www)
+#   https://$DOMAIN/api/...   FastAPI        (Swagger at /api/docs)
+services:
+  api:
+    build: ../backend
+    image: basketwise-api:latest
+    container_name: basketwise-api          # daily.sh restarts it by this name
+    restart: unless-stopped
+    # Caddy strips /api before proxying; --root-path makes Swagger link /api/openapi.json.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "1", "--no-access-log", "--root-path", "/api"]
+    volumes:
+      - /srv/basketwise/data:/data:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 128
+    environment:
+      BASKETWISE_CORS: ${BASKETWISE_CORS:-*}
+      BASKETWISE_CACHE_KB: "32000"
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:-}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  caddy:
+    image: caddy:2.10
+    container_name: basketwise-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in /srv/basketwise/basketwise.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/basketwise/www:/srv/www:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api]
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  caddy_data:     # TLS certificates -- keep it, or Let's Encrypt rate limits bite
+  caddy_config:

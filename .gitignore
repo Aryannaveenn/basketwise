@@ -221,3 +221,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# BasketWise
+# ---------------------------------------------------------------------------
+# macOS
+.DS_Store
+
+# Frontend dependencies and build output
+node_modules/
+frontend/dist/
+.env.local
+
+# Scraper: Mac binary (the server builds its own), venv, and all crawl output.
+# The SQLite files exceed GitHub's 100 MB limit; cookies are live session tokens.
+scraper/hyperscrape
+scraper/.venv-hs/
+scraper/data/
+scraper/aryan_data/
+scraper/example_requests/**/*.har
+*.db
+*.db-shm
+*.db-wal
+*.ndjson

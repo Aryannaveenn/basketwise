@@ -1,0 +1,189 @@
+import { useRef, useState } from 'react'
+import { MdAdd, MdCheck } from 'react-icons/md'
+import { Link } from 'react-router'
+
+import { formatSize } from '@/api/client'
+import productDefault from '@/assets/product_card/product_default.png'
+import StorePriceRow from '@/components/StorePriceRow'
+import type { Retailer, StoreOffer } from '@/components/storePrices'
+import { cn } from '@/lib/utils'
+
+const POP_DURATION_MS = 420
+const PRODUCT_NAME_MAX_LENGTH = 24
+
+type ProductOffer = StoreOffer
+
+type ProductCardProduct = {
+  id: string
+  name: string
+  brand?: string | null
+  size_value?: number | null
+  size_unit?: string | null
+  image_url?: string | null
+  unit_price?: number | null
+  unit_measure?: string | null
+  was_price?: number | null
+  has_special?: boolean
+  cheapest_retailer?: Retailer | null
+  offers?: ProductOffer[]
+}
+
+type ProductCardProps = {
+  product: ProductCardProduct
+  added: boolean
+  onAdd: () => void
+  onRemove: () => void
+}
+
+function fmt(n: number) {
+  return `$${n.toFixed(2)}`
+}
+
+function truncateText(text: string, maxLength = PRODUCT_NAME_MAX_LENGTH) {
+  if (text.length <= maxLength) return text
+
+  return `${text.slice(0, maxLength).trim()}...`
+}
+
+export default function ProductCard({
+  product,
+  added,
+  onAdd,
+  onRemove,
+}: ProductCardProps) {
+  const [justAdded, setJustAdded] = useState(false)
+  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null)
+
+  const popTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  )
+
+  const imageSrc =
+    product.image_url && failedImageUrl !== product.image_url
+      ? product.image_url
+      : productDefault
+
+  const brand = product.brand?.trim() || 'No brand'
+  const size = formatSize(product)
+
+  // Same destination the header search bar and the search results page use.
+  const productHref = `/product/${encodeURIComponent(product.id)}`
+
+  const unitPrice =
+    product.unit_price != null && product.unit_measure
+      ? `${fmt(product.unit_price)} / ${product.unit_measure}`
+      : null
+
+  function handleToggle() {
+    if (added) {
+      onRemove()
+      return
+    }
+
+    onAdd()
+    setJustAdded(true)
+
+    clearTimeout(popTimeout.current)
+
+    popTimeout.current = setTimeout(() => setJustAdded(false), POP_DURATION_MS)
+  }
+
+  return (
+    <div className="flex w-full flex-col bg-white">
+      <div className="group relative flex aspect-square items-center justify-center overflow-hidden rounded-2xl border border-dashed border-bw-line-strong bg-white">
+        {product.has_special && (
+          <div className="absolute top-2 left-2 z-10 flex flex-col items-center gap-1">
+            <span className="rounded-full bg-bw-yellow px-2 py-1 text-[10px] font-semibold text-bw-yellow-ink">
+              Special
+            </span>
+
+            {product.was_price != null && (
+              <span className="text-[10px] text-bw-muted">
+                was{' '}
+                <span className="line-through">{fmt(product.was_price)}</span>
+              </span>
+            )}
+          </div>
+        )}
+
+        <Link
+          to={`/product/${product.id}`}
+          aria-label={product.name}
+          className="flex h-full w-full items-center justify-center focus-visible:ring-2 focus-visible:ring-bw-green focus-visible:outline-none"
+        >
+          <img
+            src={imageSrc}
+            alt={product.name}
+            onError={() => {
+              if (product.image_url) {
+                setFailedImageUrl(product.image_url)
+              }
+            }}
+            className="h-[168px] w-[180px] object-contain transition-transform duration-300 ease-out group-hover:scale-110 motion-reduce:transition-none motion-reduce:group-hover:scale-100"
+          />
+        </Link>
+
+        {/* Stretched hit target for the image. The add/remove button sits inside
+            this container, so the image can't simply be wrapped in the link --
+            a <button> inside an <a> is invalid and would navigate on add. */}
+        <Link
+          to={productHref}
+          aria-label={product.name}
+          className="absolute inset-0 z-10 rounded-2xl focus-visible:ring-2 focus-visible:ring-bw-green focus-visible:outline-none"
+        />
+
+        <button
+          type="button"
+          onClick={handleToggle}
+          aria-label={added ? 'Remove from basket' : 'Add to basket'}
+          title={added ? 'Remove from basket' : 'Add to basket'}
+          className={cn(
+            'absolute right-2 bottom-2 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-bw-line bg-white text-bw-ink transition-colors',
+            'hover:border-bw-green hover:bg-bw-green hover:text-white',
+            'focus-visible:ring-2 focus-visible:ring-bw-green focus-visible:outline-none',
+            added && 'border-bw-green bg-bw-green text-white',
+            justAdded && 'animate-[bw-pop_420ms_ease]',
+          )}
+        >
+          {added ? (
+            <MdCheck className="h-4 w-4" />
+          ) : (
+            <MdAdd className="h-4 w-4" />
+          )}
+        </button>
+      </div>
+
+      <div className="pt-3">
+        <p className="mb-1 text-[11px] leading-none text-bw-muted">{brand}</p>
+
+        <Link
+
+          to={productHref}
+          title={product.name}
+          className="block min-h-[18px] text-sm leading-[1.3] font-semibold text-bw-ink hover:underline focus-visible:ring-2 focus-visible:ring-bw-green focus-visible:outline-none"
+
+          // to={`/product/${product.id}`}
+          // title={product.name}
+          // className="block min-h-[18px] text-sm leading-[1.3] font-semibold text-bw-ink hover:text-bw-green hover:underline focus-visible:ring-2 focus-visible:ring-bw-green focus-visible:outline-none"
+>
+          {truncateText(product.name)}
+        </Link>
+
+        {(size || unitPrice) && (
+          <p className="mt-1 text-[11px] text-bw-muted">
+            {size}
+
+            {size && unitPrice ? ' · ' : ''}
+
+            {unitPrice}
+          </p>
+        )}
+      </div>
+
+      <StorePriceRow
+        offers={product.offers}
+        cheapestRetailer={product.cheapest_retailer}
+      />
+    </div>
+  )
+}

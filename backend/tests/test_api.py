@@ -1,0 +1,332 @@
+"""Contract tests: these assert the shapes in Source-of-truth.md, so if someone
+changes a field name the test fails before the frontend does.
+
+  .venv/bin/python -m pytest tests -q
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import db  # noqa: E402
+import main  # noqa: E402
+
+PRODUCT_FIELDS = {"id", "name", "brand", "category", "subcategory", "tags", "size_value",
+                  "size_unit", "image_url", "is_essential", "min_price", "cheapest_retailer",
+                  "unit_price", "unit_measure", "was_price", "has_special", "retailer_count",
+                  "rating_avg", "rating_count", "offers"}
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(main.app) as c:
+        yield c
+
+
+def test_health(client):
+    d = client.get("/health").json()
+    assert d["status"] == "ok"
+    assert d["product_count"] > 1000
+    assert "coles" in d["retailers"] and "woolworths" in d["retailers"]
+    # Present on every build since data_as_of was added; None only on older artifacts.
+    assert "data_as_of" in d
+
+
+def test_categories_shape(client):
+    cats = client.get("/categories").json()
+    assert cats, "no categories -- the build produced an empty catalogue"
+    for c in cats:
+        assert {"id", "name", "subcategories"} <= c.keys()
+        assert c["id"] == c["id"].lower().replace(" ", "-"), "ids must be canonical slugs"
+        for s in c["subcategories"]:
+            assert {"id", "name"} <= s.keys()
+
+
+def test_products_shape_and_bounds(client):
+    ps = client.get("/products?limit=5").json()
+    assert len(ps) == 5
+    assert all(PRODUCT_FIELDS == p.keys() for p in ps)
+    assert isinstance(ps[0]["tags"], list)
+    # limit is hard-capped so the whole catalogue can never be pulled at once
+    assert client.get("/products?limit=101").status_code == 422
+
+
+def test_no_match_returns_empty_list_not_404(client):
+    r = client.get("/products?category=not-a-real-category")
+    assert r.status_code == 200 and r.json() == []
+
+
+def test_category_filter_only_returns_that_category(client):
+    ps = client.get("/products?category=dairy-eggs-fridge&limit=50").json()
+    assert ps and all(p["category"] == "dairy-eggs-fridge" for p in ps)
+
+
+def test_pagination_does_not_repeat(client):
+    a = [p["id"] for p in client.get("/products?limit=10&offset=0").json()]
+    b = [p["id"] for p in client.get("/products?limit=10&offset=10").json()]
+    assert not set(a) & set(b)
+
+
+def test_search(client):
+    ps = client.get("/products?q=milk&limit=10").json()
+    assert ps and any("milk" in p["name"].lower() for p in ps)
+    # a query that is only punctuation must not blow up the FTS parser
+    assert client.get('/products?q="""&limit=5').status_code == 200
+
+
+def test_search_size_token_is_matched_against_size_not_name(client):
+    """"1kg protein powder" used to return nothing: FTS required every token in the
+    name, and "1kg" is the product's size, not a word in its name."""
+    ps = client.get("/products?q=1kg+protein+powder&limit=10").json()
+    assert ps, "size token still being required as name text"
+    assert all("protein" in p["name"].lower() for p in ps)
+    # the spelled-out form parses the same way
+    spaced = client.get("/products?q=1+kg+protein+powder&limit=10").json()
+    assert [p["id"] for p in spaced] == [p["id"] for p in ps]
+
+
+def test_search_size_token_filters_and_ranks_by_size(client):
+    """When the catalogue does have that size, it is what comes back first."""
+    r = client.get("/products?q=2L+milk&limit=10")
+    ps = r.json()
+    assert ps
+    assert ps[0]["size_unit"] == "ml" and abs(ps[0]["size_value"] - 2000) < 40
+    # narrower than the un-sized query -- the size is a real constraint
+    assert int(r.headers["x-total-count"]) < int(
+        client.get("/products?q=milk&limit=1").headers["x-total-count"])
+
+
+def test_search_tolerates_a_typo(client):
+    ps = client.get("/products?q=protien+powder&limit=10").json()
+    assert ps, "no fuzzy fallback for a misspelled term"
+    assert any("protein" in p["name"].lower() for p in ps)
+
+
+def test_search_matches_plural_and_singular(client):
+    singular = {p["id"] for p in client.get("/products?q=yoghurt&limit=20").json()}
+    plural = {p["id"] for p in client.get("/products?q=yoghurts&limit=20").json()}
+    assert plural and singular & plural, "plural query missed the singular products"
+
+
+def test_search_corrects_a_transposed_typo(client):
+    """Swapped adjacent letters are one edit, not two.
+
+    Under plain Levenshtein "mlik" sits two edits from "milk" but only one from
+    "mik", so the obvious correction loses to a rarer word.
+    """
+    ps = client.get("/products?q=mlik&limit=10").json()
+    assert ps and any("milk" in p["name"].lower() for p in ps)
+
+
+def test_search_corrects_a_term_that_technically_exists(client):
+    """A word in the catalogue can still be a typo.
+
+    One obscure product containing "Chocolat" puts that term in the vocabulary;
+    it must not block the correction to the vastly commoner "chocolate".
+    """
+    ps = client.get("/products?q=chocolat+mlik&limit=10").json()
+    assert ps
+    top = " ".join(p["name"].lower() for p in ps[:5])
+    assert "chocolate" in top and "milk" in top
+
+
+def test_search_or_fallback_ranks_by_term_coverage(client):
+    """On the OR rung, matching both words must beat matching one common word.
+
+    Otherwise "Baking Powder" outranks every protein product for
+    "protein powder", because it wins on retailer_count.
+    """
+    ps = client.get("/products?q=protein+powder+zzzzqqq&limit=5").json()
+    assert ps and "protein" in ps[0]["name"].lower()
+
+
+def test_search_does_not_correct_common_words(client):
+    """Fuzzy tolerance must not rewrite a term the catalogue genuinely uses."""
+    import search
+    for term in ("milk", "cream", "organic", "pear", "lite"):
+        assert search.correct(term) is None, f"{term} was treated as a typo"
+
+
+def test_search_multi_token_is_not_strict_and(client):
+    """One unmatched token must not empty the whole result set."""
+    ps = client.get("/products?q=protein+powder+zzzzqqq&limit=10").json()
+    assert ps and any("protein" in p["name"].lower() for p in ps)
+
+
+def test_search_ranks_exact_name_matches_first(client):
+    ps = client.get("/products?q=chocolate+biscuits&limit=10").json()
+    assert ps
+    assert "chocolate" in ps[0]["name"].lower() and "biscuits" in ps[0]["name"].lower()
+
+
+def test_search_input_cannot_inject_fts_operators(client):
+    """Every term is quoted, so FTS5 syntax in `q` is matched as literal text."""
+    for q in ["milk OR *", "milk NEAR/2 bread", 'a" OR "b', "^milk", "NOT milk", "((("]:
+        assert client.get("/products", params={"q": q, "limit": 5}).status_code == 200
+
+
+def test_search_keeps_pagination_contract(client):
+    r = client.get("/products?q=protein+powder&limit=5&offset=0")
+    total = int(r.headers["x-total-count"])
+    first = [p["id"] for p in r.json()]
+    second = [p["id"] for p in client.get(
+        "/products?q=protein+powder&limit=5&offset=5").json()]
+    assert total >= 10 and len(first) == 5
+    assert not set(first) & set(second), "search paging repeats rows"
+
+
+def test_search_can_combine_with_other_filters(client):
+    ps = client.get("/products?q=milk&category=dairy-eggs-fridge&limit=10").json()
+    assert ps and all(p["category"] == "dairy-eggs-fridge" for p in ps)
+
+
+def test_search_with_no_possible_match_is_empty_not_error(client):
+    r = client.get("/products?q=zzzzqqq+wwwwxxx&limit=5")
+    assert r.status_code == 200 and r.json() == []
+    assert r.headers["x-total-count"] == "0"
+
+
+def test_essentials_are_ordered_and_flagged(client):
+    ps = client.get("/products?essential=true&limit=20").json()
+    assert len(ps) == 20 and all(p["is_essential"] for p in ps)
+
+
+def test_product_detail_has_offers(client):
+    pid = db.db().execute("SELECT id FROM products WHERE retailer_count>=2 LIMIT 1").fetchone()["id"]
+    d = client.get(f"/products/{pid}").json()
+    assert len(d["offers"]) >= 2
+    assert {"retailer", "price", "product_url"} <= d["offers"][0].keys()
+    assert client.get("/products/nope-does-not-exist").status_code == 404
+
+
+def test_compare_returns_three_options(client):
+    ids = [r["id"] for r in db.db().execute(
+        "SELECT id FROM products WHERE retailer_count>=2 LIMIT 4")]
+    d = client.post("/compare", json={"items": [{"product_id": i, "quantity": 1} for i in ids]}).json()
+    assert [o["id"] for o in d["options"]] == [
+        "recommended-split", "cheapest-single-store", "lowest-possible-price"]
+    rec = {o["id"]: o["recommended"] for o in d["options"]}
+    assert rec == {
+        "recommended-split": True,
+        "cheapest-single-store": False,
+        "lowest-possible-price": False,
+    }
+    for o in d["options"]:
+        assert {"id", "name", "description", "total", "savings", "stores", "recommended", "breakdown"} <= o.keys()
+        if o["total"] is None:
+            assert o["savings"] is None and o["stores"] == 0 and o["breakdown"] == [] and o["description"] == ""
+        else:
+            assert o["stores"] == len(o["breakdown"])
+            assert o["stores"] >= 1
+            for group in o["breakdown"]:
+                assert {"retailer", "subtotal", "items"} <= group.keys()
+                for item in group["items"]:
+                    assert {"product_id", "product_name", "retailer_product_id",
+                            "retailer_product_name", "quantity", "unit_price",
+                            "line_total", "image_url"} <= item.keys()
+
+
+def test_compare_quantity_scales_total(client):
+    ids = [r["id"] for r in db.db().execute(
+        "SELECT id FROM products WHERE retailer_count>=2 LIMIT 3")]
+    one = client.post("/compare", json={"items": [{"product_id": i, "quantity": 1} for i in ids]}).json()
+    two = client.post("/compare", json={"items": [{"product_id": i, "quantity": 2} for i in ids]}).json()
+    by = lambda d: {o["id"]: o["total"] for o in d["options"]}
+    for oid, t in by(one).items():
+        if t is None:
+            assert by(two)[oid] is None
+        else:
+            assert abs(t * 2 - by(two)[oid]) < 0.01
+
+
+def test_compare_reports_unknown_ids_explicitly(client):
+    d = client.post("/compare", json={"items": [{"product_id": "nope", "quantity": 1}]}).json()
+    assert d["unknown_product_ids"] == ["nope"]
+    assert d["options"] == []
+
+
+def test_compare_rejects_zero_quantity(client):
+    r = client.post("/compare", json={"items": [{"product_id": "x", "quantity": 0}]})
+    assert r.status_code == 422
+
+
+def test_products_have_usable_images(client):
+    """Product cards are image-first; a card with no image is a broken card."""
+    ps = client.get("/products?limit=50").json()
+    imgs = [p["image_url"] for p in ps if p["image_url"]]
+    assert len(imgs) >= 48, "image coverage dropped below 96%"
+    assert all(u.startswith("https://") for u in imgs), "image_url must be absolute https"
+
+
+def test_products_list_includes_offer_summary(client):
+    """Product cards render a per-retailer price grid from `offers` without a
+    second request -- see ProductOfferSummary in models.py."""
+    ps = client.get("/products?multi_retailer=true&limit=5").json()
+    assert ps
+    for p in ps:
+        assert len(p["offers"]) == p["retailer_count"] >= 2
+        assert {"retailer", "price"} <= p["offers"][0].keys()
+        prices = [o["price"] for o in p["offers"]]
+        assert prices == sorted(prices), "offers must be cheapest-first"
+
+
+def test_price_fields_describe_one_retailer(client):
+    """min_price/was_price/unit_price must all come from cheapest_retailer, or the
+    card shows a Coles price next to an ALDI unit price."""
+    ps = client.get("/products?special=true&limit=30").json()
+    assert ps
+    for p in ps:
+        assert p["cheapest_retailer"], "priced product with no cheapest_retailer"
+        if p["was_price"] is not None:
+            assert p["was_price"] > p["min_price"], "was_price must exceed the current price"
+
+
+def test_total_count_header_supports_pagination(client):
+    r = client.get("/products?category=dairy-eggs-fridge&limit=5")
+    total = int(r.headers["x-total-count"])
+    assert total > 5 and len(r.json()) == 5
+    assert "X-Total-Count" in r.headers.get("access-control-expose-headers", "")
+    # the header must describe the filter, not the whole catalogue
+    assert total < int(client.get("/products?limit=1").headers["x-total-count"])
+
+
+def test_tag_filter_returns_only_tagged_products(client):
+    ps = client.get("/products?tag=vegan&limit=20").json()
+    assert ps, "no vegan products -- the dietary->tag mapping regressed"
+    assert all("vegan" in p["tags"] for p in ps)
+
+
+def test_price_history(client):
+    pid = db.db().execute(
+        "SELECT p.id FROM products p JOIN offers o ON o.product_id=p.id "
+        "JOIN price_history h ON h.offer_id=o.id LIMIT 1").fetchone()["id"]
+    # 365 = the route's max look-back, so a snapshot older than the default 30
+    # days still exercises the response shape.
+    series = client.get(f"/products/{pid}/price-history?days=365").json()
+    assert series and {"product_id", "retailer", "points"} <= series[0].keys()
+    assert series[0]["points"]
+    assert client.get("/products/nope/price-history").status_code == 404
+
+
+def test_openapi_is_generated(client):
+    spec = client.get("/openapi.json").json()
+    assert {"/categories", "/products", "/compare"} <= spec["paths"].keys()
+    assert "Product" in spec["components"]["schemas"]
+    compare_schema = spec["components"]["schemas"]["CompareResponse"]["properties"]
+    assert "options" in compare_schema and "stores" not in compare_schema
+    option_schema = spec["components"]["schemas"]["CompareOption"]
+    assert "total" in option_schema["properties"] and "savings" in option_schema["properties"]
+    item_schema = spec["components"]["schemas"]["CompareItem"]["properties"]
+    assert "image_url" in item_schema and "retailer_product_id" in item_schema
+
+
+def test_etag_gives_304(client):
+    r = client.get("/categories")
+    etag = r.headers["etag"]
+    assert "public" in r.headers["cache-control"]
+    assert client.get("/categories", headers={"If-None-Match": etag}).status_code == 304

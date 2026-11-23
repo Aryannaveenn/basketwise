@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the BasketWise pipeline every night (Sydney time)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Australia/Sydney
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

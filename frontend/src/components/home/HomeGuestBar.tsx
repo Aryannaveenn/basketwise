@@ -1,0 +1,40 @@
+import { useSignInModal } from '@/context/useSignInModal'
+
+export default function HomeGuestBar() {
+  const { openSignIn } = useSignInModal()
+
+  return (
+    <section className="sticky top-[60px] z-30 w-full bg-[#252522] text-white">
+      <div className="flex h-[46px] items-center justify-between px-6 lg:px-8 xl:px-12 2xl:px-16">
+        <div className="flex items-center gap-3 text-sm tracking-[0.08em] text-white/65 uppercase">
+          {/* <a href="#faq">
+              <span>HOW DOES IT WORK?</span>
+            </a> */}
+          <span>HI THERE GUEST</span>
+        </div>
+
+        <div className="hidden items-center gap-3 text-sm tracking-[0.07em] text-white/55 uppercase sm:flex">
+          <span>COMPARE AS A GUEST. SIGN IN TO ACCESS YOUR LISTS.</span>
+
+          <button
+            type="button"
+            aria-haspopup="dialog"
+            onClick={openSignIn}
+            className="text-white/70 underline underline-offset-2 transition-colors hover:text-white"
+          >
+            SIGN IN
+          </button>
+        </div>
+
+        <button
+          type="button"
+          aria-haspopup="dialog"
+          onClick={openSignIn}
+          className="text-sm tracking-[0.07em] text-white/70 uppercase underline underline-offset-2 sm:hidden"
+        >
+          SIGN IN
+        </button>
+      </div>
+    </section>
+  )
+}
