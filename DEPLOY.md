@@ -103,7 +103,7 @@ Sources: [AWS Free Tier](https://aws.amazon.com/free/), [EC2 free tier usage](ht
 | Swap | **4 GiB** swap file (Phase 4) | headroom for the build and the frontend build on 1 GiB of RAM |
 | CPU credits | **Standard** (not Unlimited) | no surprise CPU charges |
 | Public IP | **Elastic IP** | stable address for DNS and HTTPS |
-| Inbound ports | 22 from *your IP only*; 80 and 443 from anywhere | |
+| Inbound ports | 22, 80 and 443 from anywhere | SSH is key-only, so an open port 22 doesn't need updating when your home IP changes |
 
 Memory at runtime: API ≤ 512 MB (hard cap), Caddy ≤ 128 MB, the OS ≈ 150 MB.
 
@@ -142,7 +142,7 @@ In the [EC2 console](https://console.aws.amazon.com/ec2/), set the region select
 | **Instance type** | `t3.micro` |
 | **Key pair** | **Create new key pair** → name `basketwise`, type **ED25519**, format **.pem** → it downloads `basketwise.pem` |
 | **Network settings** → **Edit** | VPC: default. Auto-assign public IP: **Enable**. Firewall: **Create security group**, name `basketwise-sg`. |
-| Inbound rule 1 | Type **SSH**, port 22, Source **My IP** |
+| Inbound rule 1 | Type **SSH**, port 22, Source **Anywhere** (`0.0.0.0/0`). Phase 2.2 checks that password login is off. |
 | Inbound rule 2 | **Add security group rule** → Type **HTTP**, port 80, Source **Anywhere** (`0.0.0.0/0`) |
 | Inbound rule 3 | **Add security group rule** → Type **HTTPS**, port 443, Source **Anywhere** (`0.0.0.0/0`) |
 | **Configure storage** | **20** GiB, **gp3** |
@@ -155,10 +155,12 @@ Click **Launch instance**. Then attach a stable address: **Network & Security �
 Put the Elastic IP in `EIP=` and run. It moves the key into `~/.ssh`, adds a `basketwise` SSH alias, and connects once to confirm the OS:
 
 ```bash
-EIP=3.25.10.7; mv ~/Downloads/basketwise.pem ~/.ssh/ && chmod 400 ~/.ssh/basketwise.pem && printf '\nHost basketwise\n  HostName %s\n  User ubuntu\n  IdentityFile ~/.ssh/basketwise.pem\n  ServerAliveInterval 60\n' "$EIP" >> ~/.ssh/config && ssh -o StrictHostKeyChecking=accept-new basketwise 'grep PRETTY_NAME /etc/os-release'
+EIP=3.25.10.7; mv ~/Downloads/basketwise.pem ~/.ssh/ && chmod 400 ~/.ssh/basketwise.pem && printf '\nHost basketwise\n  HostName %s\n  User ubuntu\n  IdentityFile ~/.ssh/basketwise.pem\n  ServerAliveInterval 60\n' "$EIP" >> ~/.ssh/config && ssh -o StrictHostKeyChecking=accept-new basketwise 'grep PRETTY_NAME /etc/os-release; sudo sshd -T | grep -E "^(passwordauthentication|permitrootlogin) "'
 ```
 
-It should print `PRETTY_NAME="Ubuntu 26.04 LTS"` (possibly with a point release). If your home IP changes later and SSH times out, edit `basketwise-sg` and set the SSH rule back to *My IP*.
+It should print `PRETTY_NAME="Ubuntu 26.04 LTS"` (possibly with a point release), then `passwordauthentication no` and `permitrootlogin no` (or `prohibit-password`).
+
+Those two lines are what make an SSH port open to the whole internet safe: only someone with your private key can log in. **If `passwordauthentication` says `yes`, stop and change the security group's SSH rule to *My IP* before going further.** Keep `~/.ssh/basketwise.pem` out of the repo and out of synced cloud folders; it's the only thing protecting the server.
 
 ---
 
@@ -398,7 +400,7 @@ Repeat Phases 2–6. Update the Route 53 record if the Elastic IP changes, and r
 
 ### SSH times out
 
-Your home IP changed. Edit `basketwise-sg` and set the SSH rule back to *My IP*.
+Check the instance is running and `basketwise-sg` still allows port 22 from `0.0.0.0/0`. If you later limited SSH to *My IP*, your home IP has probably changed: set the rule to *My IP* again.
 
 ### HTTPS doesn't work / Caddy can't get a certificate
 
@@ -454,7 +456,7 @@ ssh basketwise 'du -sh ~/basketwise/scraper/data/* | sort -h | tail; docker syst
 ## Security notes
 
 - **No secrets in git**, and in snapshot mode none on the server either. `basketwise.env` still lives only in `/srv/basketwise`, with mode `600`.
-- **SSH is limited to your IP**, with key-only login (Ubuntu's AMI default).
+- **SSH is open to any IP but key-only**: password authentication and root password login are off (Ubuntu's AMI default, checked in Phase 2.2). Expect failed login attempts from bots in the auth log; they're harmless with key-only login, and OpenSSH throttles repeat offenders. For tighter control, set the SSH rule to *My IP*.
 - **The API container** runs as a non-root user, with a read-only filesystem, all Linux capabilities dropped, a 512 MB memory cap, and the database mounted read-only.
 - **Only Caddy has published ports** (80/443). The API is reachable only through it.
 - **Automatic security updates** are on (`unattended-upgrades`). Reboot now and then for kernel updates with `ssh basketwise sudo reboot`. The containers come back on their own (`restart: unless-stopped`).
