@@ -40,7 +40,7 @@ For prices that update every day, see [`deploy/LIVE-CRAWLING.md`](deploy/LIVE-CR
 ```
                  https://basketwise.aryannaveen.com
                                  │
-                 ┌───────────────▼────────────────┐   EC2 t3.micro (Sydney)
+                 ┌───────────────▼────────────────┐   EC2 t3.micro (us-east-1)
                  │  Caddy  (ports 80/443, HTTPS)  │   Ubuntu 26.04 + Docker
                  │   /        → React build       │
                  │   /api/*   → FastAPI container │
@@ -95,14 +95,14 @@ Sources: [AWS Free Tier](https://aws.amazon.com/free/), [EC2 free tier usage](ht
 
 | Setting | Value | Why |
 |---|---|---|
-| Region | **Asia Pacific (Sydney) `ap-southeast-2`** | closest to Australian shoppers |
+| Region | **US East (N. Virginia) `us-east-1`** | where this instance runs. Pages load about 200 ms slower from Australia than from Sydney (`ap-southeast-2`), which is fine for this site. For [live crawling](deploy/LIVE-CRAWLING.md), Sydney is better. |
 | Instance type | **`t3.micro`** (2 vCPU, 1 GiB) | the API needs about 250 MB; swap covers the one-off build |
 | Architecture | **x86_64** | |
 | AMI | **Ubuntu Server 26.04 LTS (HVM), SSD Volume Type, 64-bit (x86)** | Canonical's official image, supported to April 2031 |
 | Root volume | **20 GiB gp3** | the crawl files and build use under 1 GB; Docker images and the frontend build use a few more |
 | Swap | **4 GiB** swap file (Phase 4) | headroom for the build and the frontend build on 1 GiB of RAM |
 | CPU credits | **Standard** (not Unlimited) | no surprise CPU charges |
-| Public IP | **Elastic IP** | stable address for DNS and HTTPS |
+| Public IP | **Elastic IP** `184.195.227.79` | stable address for DNS and HTTPS |
 | Inbound ports | 22, 80 and 443 from anywhere | SSH is key-only, so an open port 22 doesn't need updating when your home IP changes |
 
 Memory at runtime: API ≤ 512 MB (hard cap), Caddy ≤ 128 MB, the OS ≈ 150 MB.
@@ -133,7 +133,7 @@ cd ~/Desktop/basketwise && git add -A && if git diff --cached --name-only | grep
 
 ### 2.1 Launch (AWS console)
 
-In the [EC2 console](https://console.aws.amazon.com/ec2/), set the region selector (top right) to **Asia Pacific (Sydney) ap-southeast-2**, then **Instances → Launch instances**:
+In the [EC2 console](https://console.aws.amazon.com/ec2/), set the region selector (top right) to **US East (N. Virginia) us-east-1**, then **Instances → Launch instances**:
 
 | Section | Value |
 |---|---|
@@ -148,14 +148,14 @@ In the [EC2 console](https://console.aws.amazon.com/ec2/), set the region select
 | **Configure storage** | **20** GiB, **gp3** |
 | **Advanced details** → **Credit specification** | **Standard** |
 
-Click **Launch instance**. Then attach a stable address: **Network & Security → Elastic IPs → Allocate Elastic IP address → Allocate**, select it → **Actions → Associate Elastic IP address** → the `basketwise` instance → **Associate**. Note the address.
+Click **Launch instance**. Then attach a stable address: **Network & Security → Elastic IPs → Allocate Elastic IP address → Allocate**, select it → **Actions → Associate Elastic IP address** → the `basketwise` instance → **Associate**. Note the address. For this deploy it's **`184.195.227.79`**, and the commands below already use it.
 
 ### 2.2 SSH access (one command)
 
-Put the Elastic IP in `EIP=` and run. It moves the key into `~/.ssh`, adds a `basketwise` SSH alias, and connects once to confirm the OS:
+`EIP=` is already set to this deploy's Elastic IP; change it only if you replace the instance. It moves the key into `~/.ssh`, adds a `basketwise` SSH alias, and connects once to confirm the OS:
 
 ```bash
-EIP=3.25.10.7; mv ~/Downloads/basketwise.pem ~/.ssh/ && chmod 400 ~/.ssh/basketwise.pem && printf '\nHost basketwise\n  HostName %s\n  User ubuntu\n  IdentityFile ~/.ssh/basketwise.pem\n  ServerAliveInterval 60\n' "$EIP" >> ~/.ssh/config && ssh -o StrictHostKeyChecking=accept-new basketwise 'grep PRETTY_NAME /etc/os-release; sudo sshd -T | grep -E "^(passwordauthentication|permitrootlogin) "'
+EIP=184.195.227.79; mv ~/Downloads/basketwise.pem ~/.ssh/ && chmod 400 ~/.ssh/basketwise.pem && printf '\nHost basketwise\n  HostName %s\n  User ubuntu\n  IdentityFile ~/.ssh/basketwise.pem\n  ServerAliveInterval 60\n' "$EIP" >> ~/.ssh/config && ssh -o StrictHostKeyChecking=accept-new basketwise 'grep PRETTY_NAME /etc/os-release; sudo sshd -T | grep -E "^(passwordauthentication|permitrootlogin) "'
 ```
 
 It should print `PRETTY_NAME="Ubuntu 26.04 LTS"` (possibly with a point release), then `passwordauthentication no` and `permitrootlogin no` (or `prohibit-password`).
@@ -174,14 +174,14 @@ Caddy needs `basketwise.aryannaveen.com` to point at the Elastic IP before it ca
 |---|---|
 | Record name | `basketwise` |
 | Record type | **A** |
-| Value | the Elastic IP |
+| Value | `184.195.227.79` (the Elastic IP) |
 | TTL | `300` |
 | Routing policy | Simple routing |
 
 Leave **Alias** off (an Elastic IP isn't an alias target), then **Create records**. This waits until the record is live (usually under a minute):
 
 ```bash
-EIP=3.25.10.7; until [ "$(dig +short basketwise.aryannaveen.com)" = "$EIP" ]; do echo waiting for DNS...; sleep 10; done; echo "DNS ready"
+EIP=184.195.227.79; until [ "$(dig +short basketwise.aryannaveen.com)" = "$EIP" ]; do echo waiting for DNS...; sleep 10; done; echo "DNS ready"
 ```
 
 The domain has no CAA records, so Let's Encrypt is allowed to issue for it. If you ever add CAA records, include `0 issue "letsencrypt.org"`.
@@ -392,7 +392,7 @@ ssh basketwise '~/basketwise/deploy/scripts/up.sh restart caddy'             # r
 
 ### Rebuild onto a fresh instance
 
-Repeat Phases 2–6. Update the Route 53 record if the Elastic IP changes, and remove the old `basketwise` entry from `~/.ssh/config` and `~/.ssh/known_hosts` first. Phase 6 needs your Mac's `scraper/aryan_data/` or your backup of it.
+Repeat Phases 2–6. If the Elastic IP changes, update the Route 53 record and the `EIP=` values in Phases 2.2 and 3, and remove the old `basketwise` entry from `~/.ssh/config` and `~/.ssh/known_hosts` first. Phase 6 needs your Mac's `scraper/aryan_data/` or your backup of it.
 
 ---
 
