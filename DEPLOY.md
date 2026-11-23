@@ -7,7 +7,7 @@ This guide puts BasketWise online at **https://basketwise.aryannaveen.com** on o
 
 There is no scraping, no daily job and no Supabase. The prices never change, and the site says so: every page shows **"Prices as of 5 Sep 2026"** under the header.
 
-Expect about 45–60 minutes. Commands marked **Mac** run on your laptop from the repo root (`~/Desktop/basketwise`). Commands marked **server** run over SSH on the instance.
+Expect about 45 minutes, most of it waiting. **Every step is one command you paste into Terminal on your Mac**, from the repo root (`~/Desktop/basketwise`). Server work is sent over SSH: each server script is read in full before it runs, stops at the first error, and is safe to run again. The only manual parts are the AWS console clicks.
 
 For prices that update every day, see [`deploy/LIVE-CRAWLING.md`](deploy/LIVE-CRAWLING.md) once this is running.
 
@@ -23,16 +23,15 @@ For prices that update every day, see [`deploy/LIVE-CRAWLING.md`](deploy/LIVE-CR
 6. [Phase 2 — Launch the EC2 instance](#phase-2--launch-the-ec2-instance)
 7. [Phase 3 — Point the subdomain at it](#phase-3--point-the-subdomain-at-it)
 8. [Phase 4 — Prepare the server](#phase-4--prepare-the-server)
-9. [Phase 5 — Code and settings on the server](#phase-5--code-and-settings-on-the-server)
-10. [Phase 6 — Start the API and the website](#phase-6--start-the-api-and-the-website)
-11. [Phase 7 — Load the snapshot](#phase-7--load-the-snapshot)
-12. [Phase 8 — Budget alert and uptime check](#phase-8--budget-alert-and-uptime-check)
-13. [Final checklist](#final-checklist)
-14. [Day-2 operations](#day-2-operations)
-15. [Troubleshooting](#troubleshooting)
-16. [Security notes](#security-notes)
-17. [Tearing it down](#tearing-it-down)
-18. [Reference: files in deploy/](#reference-files-in-deploy)
+9. [Phase 5 — Install the app and start the site](#phase-5--install-the-app-and-start-the-site)
+10. [Phase 6 — Load the snapshot](#phase-6--load-the-snapshot)
+11. [Phase 7 — Budget alert and uptime check](#phase-7--budget-alert-and-uptime-check)
+12. [Final checklist](#final-checklist)
+13. [Day-2 operations](#day-2-operations)
+14. [Troubleshooting](#troubleshooting)
+15. [Security notes](#security-notes)
+16. [Tearing it down](#tearing-it-down)
+17. [Reference: files in deploy/](#reference-files-in-deploy)
 
 ---
 
@@ -49,7 +48,7 @@ For prices that update every day, see [`deploy/LIVE-CRAWLING.md`](deploy/LIVE-CR
                          │ reads (read-only)
             /srv/basketwise/data/basketwise.db + warm/
                          ▲
-                         │  daily.sh --no-crawl   (run by hand, once)
+                         │  daily.sh --no-crawl   (run once, in Phase 6)
                          │   1. build_master   hyper_*.db → master.db
                          │   2. build_api_db   → basketwise.db + warm/
                          │   3. validate       refuse a bad build
@@ -115,45 +114,26 @@ Memory at runtime: API ≤ 512 MB (hard cap), Caddy ≤ 128 MB, the OS ≈ 150 M
 You need:
 
 - [ ] An **AWS account** with access to the **`aryannaveen.com` hosted zone in Route 53**
-- [ ] The repo pushed to **GitHub** (Phase 1)
 - [ ] **`scraper/aryan_data/`** on your Mac. It's gitignored, so this folder is the **only copy** of the snapshot. Back it up (an external drive or cloud storage) before you start.
-- [ ] On your Mac: `ssh`, `rsync`, `git`, `dig` (all built into macOS)
-
-Placeholders:
-
-| Placeholder | Meaning | Example |
-|---|---|---|
-| `<EIP>` | the instance's Elastic IP | `3.25.10.7` |
+- [ ] On your Mac: `ssh`, `rsync`, `git`, `dig`, `jq` (all built into current macOS)
 
 ---
 
 ## Phase 1 — Push the code to GitHub
 
-**Mac:**
-
 ```bash
-cd ~/Desktop/basketwise
-git status --short | head        # check nothing unexpected is listed
-git add .
-git commit -m "Snapshot-mode deploy"
-git push origin main
+cd ~/Desktop/basketwise && git add -A && if git diff --cached --name-only | grep -qE 'scraper/(data|aryan_data)/|\.db($|-)|node_modules/'; then echo "STOP: crawl data or node_modules staged -- fix .gitignore"; else git commit -m "Snapshot-mode deploy"; git push origin main; fi
 ```
 
-`.gitignore` keeps out `node_modules`, the crawl databases, the `hyperscrape` binary, cookies and HAR captures. A dry run before this guide was written staged about 430 files and nothing over 5 MB. If `git add` picks up anything from `scraper/data/` or `scraper/aryan_data/`, stop and fix `.gitignore` first: GitHub rejects files over 100 MB.
+`.gitignore` keeps out `node_modules`, the crawl databases, the `hyperscrape` binary, cookies and HAR captures. GitHub rejects files over 100 MB, so the command refuses to commit if any crawl data is staged. "nothing to commit" just means it's already pushed.
 
 ---
 
 ## Phase 2 — Launch the EC2 instance
 
-All of this happens in the [AWS console](https://console.aws.amazon.com/ec2/).
+### 2.1 Launch (AWS console)
 
-### 2.1 Pick the region
-
-Top-right region selector → **Asia Pacific (Sydney) ap-southeast-2**.
-
-### 2.2 Launch
-
-**EC2 → Instances → Launch instances**, then fill in:
+In the [EC2 console](https://console.aws.amazon.com/ec2/), set the region selector (top right) to **Asia Pacific (Sydney) ap-southeast-2**, then **Instances → Launch instances**:
 
 | Section | Value |
 |---|---|
@@ -168,65 +148,39 @@ Top-right region selector → **Asia Pacific (Sydney) ap-southeast-2**.
 | **Configure storage** | **20** GiB, **gp3** |
 | **Advanced details** → **Credit specification** | **Standard** |
 
-Click **Launch instance**.
+Click **Launch instance**. Then attach a stable address: **Network & Security → Elastic IPs → Allocate Elastic IP address → Allocate**, select it → **Actions → Associate Elastic IP address** → the `basketwise` instance → **Associate**. Note the address.
 
-> Your home IP may change. If SSH later times out, edit `basketwise-sg` and set the SSH rule back to *My IP*.
+### 2.2 SSH access (one command)
 
-### 2.3 Attach an Elastic IP
-
-1. **EC2 → Network & Security → Elastic IPs → Allocate Elastic IP address** → **Allocate**.
-2. Select the new IP → **Actions → Associate Elastic IP address** → choose the `basketwise` instance → **Associate**.
-3. Note the address. This is `<EIP>`.
-
-### 2.4 SSH key on your Mac
-
-**Mac:**
+Put the Elastic IP in `EIP=` and run. It moves the key into `~/.ssh`, adds a `basketwise` SSH alias, and connects once to confirm the OS:
 
 ```bash
-mv ~/Downloads/basketwise.pem ~/.ssh/basketwise.pem
-chmod 400 ~/.ssh/basketwise.pem
-
-cat >> ~/.ssh/config <<'EOF'
-
-Host basketwise
-  HostName <EIP>
-  User ubuntu
-  IdentityFile ~/.ssh/basketwise.pem
-  ServerAliveInterval 60
-EOF
+EIP=3.25.10.7; mv ~/Downloads/basketwise.pem ~/.ssh/ && chmod 400 ~/.ssh/basketwise.pem && printf '\nHost basketwise\n  HostName %s\n  User ubuntu\n  IdentityFile ~/.ssh/basketwise.pem\n  ServerAliveInterval 60\n' "$EIP" >> ~/.ssh/config && ssh -o StrictHostKeyChecking=accept-new basketwise 'grep PRETTY_NAME /etc/os-release'
 ```
 
-Open `~/.ssh/config` and replace `<EIP>` with the real address, then:
-
-```bash
-ssh basketwise 'grep PRETTY_NAME /etc/os-release && free -h'     # Ubuntu 26.04 LTS
-```
-
-Type `yes` at the fingerprint prompt the first time.
+It should print `PRETTY_NAME="Ubuntu 26.04 LTS"` (possibly with a point release). If your home IP changes later and SSH times out, edit `basketwise-sg` and set the SSH rule back to *My IP*.
 
 ---
 
 ## Phase 3 — Point the subdomain at it
 
-Caddy needs `basketwise.aryannaveen.com` to point at `<EIP>` before it can get an HTTPS certificate. `aryannaveen.com` is hosted in **Route 53**, and the bare domain already points at another server, so add only the subdomain. Leave the existing records alone.
+Caddy needs `basketwise.aryannaveen.com` to point at the Elastic IP before it can get an HTTPS certificate. `aryannaveen.com` is hosted in **Route 53**, and the bare domain already points at another server, so add only the subdomain. Leave the existing records alone.
 
-1. AWS console → **Route 53 → Hosted zones → `aryannaveen.com` → Create record**.
-2. Fill in:
+**Route 53 → Hosted zones → `aryannaveen.com` → Create record:**
 
-   | Field | Value |
-   |---|---|
-   | Record name | `basketwise` |
-   | Record type | **A** |
-   | Value | `<EIP>` |
-   | TTL | `300` |
-   | Routing policy | Simple routing |
+| Field | Value |
+|---|---|
+| Record name | `basketwise` |
+| Record type | **A** |
+| Value | the Elastic IP |
+| TTL | `300` |
+| Routing policy | Simple routing |
 
-   Leave **Alias** off. An Elastic IP isn't an alias target.
-3. **Create records**, then check from your **Mac** until it prints `<EIP>` (usually under a minute):
+Leave **Alias** off (an Elastic IP isn't an alias target), then **Create records**. This waits until the record is live (usually under a minute):
 
-   ```bash
-   dig +short basketwise.aryannaveen.com
-   ```
+```bash
+EIP=3.25.10.7; until [ "$(dig +short basketwise.aryannaveen.com)" = "$EIP" ]; do echo waiting for DNS...; sleep 10; done; echo "DNS ready"
+```
 
 The domain has no CAA records, so Let's Encrypt is allowed to issue for it. If you ever add CAA records, include `0 issue "letsencrypt.org"`.
 
@@ -234,49 +188,32 @@ The domain has no CAA records, so Let's Encrypt is allowed to issue for it. If y
 
 ## Phase 4 — Prepare the server
 
-**Server** (`ssh basketwise`).
-
-> Ubuntu 26.04 uses `sudo-rs` and the Rust `uutils` coreutils by default. Every command in this guide works with them, so nothing needs switching.
-
-### 4.1 Updates, timezone, basic tools
+One command installs updates, sets the Sydney timezone, adds 4 GiB of swap, installs Docker from Docker's apt repository and `uv` (the Python tool the build uses), then reboots. It waits for the server to come back and prints a check of each part. About 5 minutes.
 
 ```bash
-sudo apt update && sudo DEBIAN_FRONTEND=noninteractive apt -y upgrade
+ssh basketwise 'bash -se' <<'SETUP'; sleep 20; until ssh -o ConnectTimeout=5 basketwise true 2>/dev/null; do sleep 5; done; ssh basketwise 'docker run --rm hello-world | grep -m1 Hello; docker compose version; ~/.local/bin/uv --version; swapon --show; timedatectl | grep "Time zone"'
+{
+set -euo pipefail
+APT="sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -yq"
+
+# Updates, timezone, tools, automatic security patches
+$APT update && $APT upgrade
 sudo timedatectl set-timezone Australia/Sydney
-sudo apt install -y git curl rsync sqlite3 jq tmux unattended-upgrades
-sudo dpkg-reconfigure -f noninteractive unattended-upgrades   # automatic security patches
-```
+$APT install git curl rsync sqlite3 jq tmux unattended-upgrades ca-certificates
+sudo dpkg-reconfigure -f noninteractive unattended-upgrades
 
-If the upgrade needs a restart, reboot now, wait a minute, and reconnect:
+# 4 GiB swap (skipped if it already exists)
+if [ ! -f /swapfile ]; then
+  sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+fi
+grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf >/dev/null && sudo sysctl --system >/dev/null
 
-```bash
-[ -f /var/run/reboot-required ] && sudo reboot
-```
-
-### 4.2 Swap (4 GiB)
-
-```bash
-sudo fallocate -l 4G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf
-sudo sysctl --system >/dev/null
-free -h        # Swap: 4.0Gi
-```
-
-### 4.3 Docker
-
-Install from Docker's own apt repository, which lists Ubuntu 26.04 (Resolute) as supported. The `Suites:` line reads the release name from the system, so it picks up `resolute` on its own.
-
-```bash
-sudo apt install -y ca-certificates curl
+# Docker, from Docker's apt repository (lists Ubuntu 26.04 "resolute" as supported)
 sudo install -m 0755 -d /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
 Types: deb
 URIs: https://download.docker.com/linux/ubuntu
 Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
@@ -284,221 +221,131 @@ Components: stable
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
-
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+$APT update && $APT install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
-exit
-```
 
-Reconnect so the `docker` group takes effect:
-
-```bash
-ssh basketwise
-docker run --rm hello-world     # prints "Hello from Docker!"
-docker compose version          # v2.x or later
-```
-
-Source: [Install Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/), [Linux post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/).
-
-### 4.4 uv (Python tooling for the build)
-
-```bash
+# uv (installs to ~/.local/bin)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source "$HOME/.local/bin/env"
-uv --version
+
+echo "=== setup done; rebooting (applies updates and the docker group) ==="
+sudo reboot
+}
+SETUP
 ```
 
-The installer puts `uv` in `~/.local/bin`. New SSH sessions pick it up automatically, and `daily.sh` adds that folder to its own `PATH`.
+Expected output, after a `Connection ... closed` line from the reboot: `Hello from Docker!`, a `Docker Compose version` line, a `uv` version, a 4G `/swapfile`, and `Time zone: Australia/Sydney`. If it stops earlier, the line above the error says which step failed; fix it and run the command again.
+
+**Notes for Ubuntu 26.04:**
+
+- It uses `sudo-rs` and the Rust `uutils` coreutils by default. The script avoids `sudo -E`, passing settings with `sudo env ...` instead, and uses only basic coreutils options, so nothing needs switching.
+- `NEEDRESTART_MODE=a` stops apt pausing to ask which services to restart.
+- Docker is installed from its own repository, as Docker recommends for servers, not from the `get.docker.com` convenience script. Sources: [Install Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/), [Linux post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ---
 
-## Phase 5 — Code and settings on the server
+## Phase 5 — Install the app and start the site
 
-### 5.1 Clone the repo
-
-The repo must end up at **`/home/ubuntu/basketwise`**.
-
-**If the repo is public:**
+**If the GitHub repo is private,** first give the server a read-only deploy key. This prints a public key:
 
 ```bash
-cd ~ && git clone https://github.com/Aryannaveenn/basketwise.git
+ssh basketwise 'ssh-keygen -q -t ed25519 -f ~/.ssh/github_deploy -N "" -C basketwise-ec2 && printf "Host github.com\n  IdentityFile ~/.ssh/github_deploy\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n" >> ~/.ssh/config && cat ~/.ssh/github_deploy.pub'
 ```
 
-**If it's private:** create a read-only deploy key.
+Add it in GitHub (the repo → **Settings → Deploy keys → Add deploy key**, *Allow write access* **off**), and in the command below change `REPO=` to `git@github.com:Aryannaveenn/basketwise.git`.
+
+**Then one command** clones the repo, creates the server folders and the settings file, installs the build's Python packages, starts the API and Caddy, and builds and publishes the frontend. About 5–10 minutes; the frontend build is the slow part on a `t3.micro`.
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N '' -C basketwise-ec2
-cat ~/.ssh/github_deploy.pub
-```
+ssh basketwise 'bash -se' <<'APP'
+{
+set -euo pipefail
+REPO=https://github.com/Aryannaveenn/basketwise.git
+export PATH="$HOME/.local/bin:$PATH"
 
-In GitHub, go to the repo → **Settings → Deploy keys → Add deploy key**, paste the key and leave *Allow write access* **off**. Then:
+# Code at /home/ubuntu/basketwise (the scripts expect this path)
+[ -d ~/basketwise/.git ] || git clone -q "$REPO" ~/basketwise
 
-```bash
-cat >> ~/.ssh/config <<'EOF'
-Host github.com
-  IdentityFile ~/.ssh/github_deploy
-  IdentitiesOnly yes
-EOF
-cd ~ && git clone git@github.com:Aryannaveenn/basketwise.git
-```
-
-### 5.2 Server folders
-
-```bash
-sudo mkdir -p /srv/basketwise/{data,www,state}
+# Folders: published data, website, validation state; crawl files go in scraper/data
+sudo mkdir -p /srv/basketwise/data /srv/basketwise/www /srv/basketwise/state
 sudo chown -R ubuntu:ubuntu /srv/basketwise
 mkdir -p ~/basketwise/scraper/data
-```
 
-| Path | Contents |
-|---|---|
-| `~/basketwise/scraper/data/` | the snapshot's `hyper_*.db` files (Phase 7) and the build's working files |
-| `/srv/basketwise/data/` | the published `basketwise.db` + `warm/`, mounted read-only into the API |
-| `/srv/basketwise/www/` | the built React app |
-| `/srv/basketwise/state/` | `last_build.json`, used by validation |
-| `/srv/basketwise/basketwise.env` | settings |
+# Settings file: the example is already set up for snapshot mode
+[ -f /srv/basketwise/basketwise.env ] || install -m 600 ~/basketwise/deploy/basketwise.env.example /srv/basketwise/basketwise.env
+grep -qx 'DOMAIN=basketwise.aryannaveen.com' /srv/basketwise/basketwise.env || { echo "DOMAIN wrong in basketwise.env"; exit 1; }
+grep -qx 'SUPABASE_URL=' /srv/basketwise/basketwise.env || { echo "SUPABASE_URL must be blank in snapshot mode"; exit 1; }
 
-### 5.3 Settings file
+# Python packages for the build (ready-made wheels for any Python 3; no compiler needed)
+(cd ~/basketwise/scraper && UV_PROJECT_ENVIRONMENT=.venv-hs uv sync -q)
 
-```bash
-cp ~/basketwise/deploy/basketwise.env.example /srv/basketwise/basketwise.env
-chmod 600 /srv/basketwise/basketwise.env
-cat /srv/basketwise/basketwise.env
-```
-
-The example is already set up for snapshot mode. Check it reads:
-
-```ini
-DOMAIN=basketwise.aryannaveen.com
-SUPABASE_URL=
-SUPABASE_SECRET_KEY=
-HEALTHCHECK_URL=
-BASKETWISE_CORS=*
-```
-
-**Keep the Supabase and healthcheck lines blank.** A placeholder value there makes every product page wait on a Supabase timeout. If you edit the file: no quotes, no spaces around `=`, and no comments on the same line as a value. Docker Compose and the scripts both read it.
-
-### 5.4 Python packages for the build
-
-```bash
-cd ~/basketwise/scraper
-UV_PROJECT_ENVIRONMENT=.venv-hs uv sync
-```
-
-This installs the locked packages into `scraper/.venv-hs`, the environment `daily.sh` uses. Every locked package ships a ready-made Linux build, so no compiler is needed, whichever Python 3 version uv picks.
-
----
-
-## Phase 6 — Start the API and the website
-
-### 6.1 Start the containers
-
-```bash
+# API + Caddy, then the React build
 ~/basketwise/deploy/scripts/up.sh
-```
-
-This builds the API image from `backend/Dockerfile` and starts two containers:
-
-- **`basketwise-api`**: FastAPI on the internal Docker network only (no host port). Until Phase 7 publishes a database it restarts in a loop with `database not found`. That's expected.
-- **`basketwise-caddy`**: listens on 80/443 and gets a Let's Encrypt certificate for `basketwise.aryannaveen.com` on first start.
-
-Check Caddy got its certificate:
-
-```bash
-~/basketwise/deploy/scripts/up.sh logs caddy | grep -iE 'certificate obtained|error'
-```
-
-### 6.2 Build and publish the frontend
-
-```bash
 ~/basketwise/deploy/scripts/frontend.sh
+
+sleep 5
+echo "=== Caddy certificate status ==="
+docker logs basketwise-caddy 2>&1 | grep -iE 'certificate obtained|obtain.*error|challenge failed' | tail -3 || true
+}
+APP
 ```
 
-This runs `pnpm install && pnpm build` inside a temporary `node:24-slim` container, with `VITE_API_BASE=/api` built into the bundle, then copies `frontend/dist/` to `/srv/basketwise/www/`. The first run takes a few minutes and leans on swap. No Node install is needed on the server.
+What it starts:
 
-Open `https://basketwise.aryannaveen.com`. The page shell loads; products appear after Phase 7.
+- **`basketwise-api`**: FastAPI on the internal Docker network only (no host port). Until Phase 6 publishes a database, it restarts in a loop with `database not found`. That's expected.
+- **`basketwise-caddy`**: listens on 80/443 and gets a Let's Encrypt certificate for `basketwise.aryannaveen.com` on first start. The last lines should include `certificate obtained successfully`. If it shows nothing yet, give it a minute, then see [Troubleshooting](#https-doesnt-work--caddy-cant-get-a-certificate).
+- **The frontend** is built in a temporary `node:24-slim` container with `VITE_API_BASE=/api`, then copied to `/srv/basketwise/www/`. No Node install is needed on the server.
 
-> **Building on your Mac instead** (faster on a `t3.micro`):
-> ```bash
-> # Mac
-> cd frontend && VITE_API_BASE=/api pnpm build
-> rsync -a --delete dist/ basketwise:/srv/basketwise/www/
-> ```
+Open `https://basketwise.aryannaveen.com`. The page shell loads; products appear after Phase 6.
+
+> **Faster frontend build on your Mac:** `(cd frontend && VITE_API_BASE=/api pnpm build) && rsync -a --delete frontend/dist/ basketwise:/srv/basketwise/www/`
 
 ---
 
-## Phase 7 — Load the snapshot
+## Phase 6 — Load the snapshot
 
-### 7.1 Copy the crawl files
-
-**Mac** (from the repo root). This copies about 365 MB. Include the `-wal` files: `hyper_woolworths.db-wal` holds about 7 MB of products not yet merged into the main file.
+One command copies the crawl files (about 365 MB), builds, validates and publishes on the server, then checks the live API:
 
 ```bash
-rsync -avP scraper/aryan_data/hyper_*.db scraper/aryan_data/hyper_*.db-wal \
-  basketwise:basketwise/scraper/data/
+rsync -aP scraper/aryan_data/hyper_*.db scraper/aryan_data/hyper_*.db-wal basketwise:basketwise/scraper/data/ && ssh basketwise 'set -a; . /srv/basketwise/basketwise.env; set +a; ~/basketwise/deploy/scripts/daily.sh --no-crawl' && curl -s https://basketwise.aryannaveen.com/api/health | jq '{data_as_of, product_count, offer_count, retailers}'
 ```
 
-### 7.2 Build, validate and publish
-
-**Server:**
-
-```bash
-set -a; source /srv/basketwise/basketwise.env; set +a
-~/basketwise/deploy/scripts/daily.sh --no-crawl
-```
-
-It takes a few minutes on a `t3.micro`. The output ends with:
+The `-wal` files matter: `hyper_woolworths.db-wal` holds about 7 MB of products not yet merged into the main file. The build takes a few minutes on a `t3.micro`. Its output includes:
 
 ```
 products=39,101 offers=45,182 comparable=5,334 retailers=['aldi', 'coles', 'harrisfarm', 'woolworths']
 validation ok
-...
 api healthy
-...
 SUPABASE_URL / SUPABASE_SECRET_KEY not set; skipping
-...
-=== <time>  done ===
+```
+
+and the final check prints:
+
+```json
+{ "data_as_of": "2026-09-05T03:49:40Z", "product_count": 39101, "offer_count": 45182,
+  "retailers": ["aldi", "coles", "harrisfarm", "woolworths"] }
 ```
 
 `validate.py` refuses to publish a build with fewer than 20,000 products or offers, fewer than 2,000 comparable products, fewer than 2 retailers, or a retailer with under half its offers available. If it fails, the site keeps serving whatever was there before (nothing, on the first run). See [Troubleshooting](#validation-fails).
 
-### 7.3 Check it worked
+Then open `https://basketwise.aryannaveen.com` (the "Prices as of 5 Sep 2026" strip shows under the header) and `https://basketwise.aryannaveen.com/api/docs` (Swagger).
 
-```bash
-curl -s https://basketwise.aryannaveen.com/api/health | jq '{data_as_of, product_count, offer_count, retailers}'
-# "data_as_of": "2026-09-05T03:49:40Z", "product_count": 39101, "offer_count": 45182, 4 retailers
-curl -s 'https://basketwise.aryannaveen.com/api/products?limit=2' | jq '.[].name'
-```
-
-Then open:
-
-- `https://basketwise.aryannaveen.com/`: the site, with the "Prices as of 5 Sep 2026" strip under the header
-- `https://basketwise.aryannaveen.com/api/docs`: Swagger
-
-Keep the `hyper_*.db` files in `~/basketwise/scraper/data/`. Rebuilds after code changes need them ([Day-2](#rebuild-the-data-after-a-build-code-change)).
+Leave the `hyper_*.db` files on the server. Rebuilds after code changes need them.
 
 ---
 
-## Phase 8 — Budget alert and uptime check
+## Phase 7 — Budget alert and uptime check
 
-### AWS budget alert
+- **AWS budget alert:** **Billing and Cost Management → Budgets → Create budget → Use a template → Zero spend budget** → your email → **Create**. You get an email the moment anything costs money.
+- **Uptime check (optional):** point a free monitor (UptimeRobot, Better Stack, healthchecks.io) at `https://basketwise.aryannaveen.com/api/health`.
 
-**Billing and Cost Management → Budgets → Create budget → Use a template → Zero spend budget** → your email → **Create**. You get an email the moment anything costs money.
-
-### Uptime check (optional)
-
-Point a free monitor (UptimeRobot, Better Stack, healthchecks.io) at `https://basketwise.aryannaveen.com/api/health`.
-
-### Now and then
+Health check whenever you like:
 
 ```bash
-df -h /                         # keep a few GB free
-free -h
-docker stats --no-stream        # api should sit around 250 MB
-~/basketwise/deploy/scripts/up.sh ps
+ssh basketwise 'df -h / | tail -1; free -h | head -2; docker stats --no-stream --format "{{.Name}} {{.MemUsage}}"; ~/basketwise/deploy/scripts/up.sh ps --format "{{.Name}} {{.Status}}"'
 ```
+
+Keep a few GB of disk free; the API should sit around 250 MB.
 
 ---
 
@@ -518,43 +365,32 @@ docker stats --no-stream        # api should sit around 250 MB
 
 ### Deploy new code
 
-**Mac:** commit and push. **Server:**
+One command pushes from your Mac, resets the server to `origin/main`, and rebuilds the API and the frontend:
 
 ```bash
-cd ~/basketwise
-git fetch origin && git reset --hard origin/main
+git push origin main && ssh basketwise 'cd ~/basketwise && git fetch -q origin && git reset -q --hard origin/main && deploy/scripts/up.sh && deploy/scripts/frontend.sh'
 ```
 
-The server never has hand edits, so reset rather than merge. `scraper/data/` is gitignored, so the reset leaves the crawl files alone. Then run whichever applies:
+The server never has hand edits, so reset rather than merge. `scraper/data/` is gitignored, so the reset leaves the crawl files alone.
 
-| What changed | Run |
-|---|---|
-| `backend/` | `~/basketwise/deploy/scripts/up.sh` (rebuilds and restarts the API) |
-| `frontend/` | `~/basketwise/deploy/scripts/frontend.sh` |
-| `scraper/tui/`, `backend/shapes.py` or `backend/data/essentials.txt` | the rebuild below |
-| `deploy/compose.yml` or `deploy/Caddyfile` | `~/basketwise/deploy/scripts/up.sh` |
-| `scraper/pyproject.toml` or `uv.lock` | `cd ~/basketwise/scraper && UV_PROJECT_ENVIRONMENT=.venv-hs uv sync` |
-
-### Rebuild the data after a build-code change
+If the change touched **`scraper/tui/`, `backend/shapes.py`, `backend/data/essentials.txt` or `scraper/uv.lock`**, also refresh the packages and rebuild the data from the snapshot:
 
 ```bash
-set -a; source /srv/basketwise/basketwise.env; set +a
-~/basketwise/deploy/scripts/daily.sh --no-crawl
+ssh basketwise 'export PATH="$HOME/.local/bin:$PATH"; cd ~/basketwise/scraper && UV_PROJECT_ENVIRONMENT=.venv-hs uv sync -q && set -a && . /srv/basketwise/basketwise.env && set +a && ~/basketwise/deploy/scripts/daily.sh --no-crawl'
 ```
 
 The same snapshot goes in, so the counts and `data_as_of` stay the same; only `build_id` and `built_at` change.
 
-### Useful commands
+### Logs and restarts
 
 ```bash
-~/basketwise/deploy/scripts/up.sh ps                 # container status
-~/basketwise/deploy/scripts/up.sh logs -f api        # API logs
-~/basketwise/deploy/scripts/up.sh restart caddy
+ssh basketwise '~/basketwise/deploy/scripts/up.sh logs --tail 50 api'        # API logs
+ssh basketwise '~/basketwise/deploy/scripts/up.sh restart caddy'             # restart Caddy
 ```
 
 ### Rebuild onto a fresh instance
 
-Do Phases 2–6 (update the Route 53 record if the Elastic IP changes), then Phase 7 again from your Mac's `scraper/aryan_data/` or your backup of it.
+Repeat Phases 2–6. Update the Route 53 record if the Elastic IP changes, and remove the old `basketwise` entry from `~/.ssh/config` and `~/.ssh/known_hosts` first. Phase 6 needs your Mac's `scraper/aryan_data/` or your backup of it.
 
 ---
 
@@ -567,37 +403,38 @@ Your home IP changed. Edit `basketwise-sg` and set the SSH rule back to *My IP*.
 ### HTTPS doesn't work / Caddy can't get a certificate
 
 ```bash
-~/basketwise/deploy/scripts/up.sh logs caddy | tail -50
+dig +short basketwise.aryannaveen.com; ssh basketwise 'grep ^DOMAIN= /srv/basketwise/basketwise.env; docker logs basketwise-caddy 2>&1 | tail -30'
 ```
 
-- `dig +short basketwise.aryannaveen.com` must print `<EIP>`.
+- The `dig` output must be the Elastic IP, and `DOMAIN` must be exactly `basketwise.aryannaveen.com`.
 - The security group must allow **80 and 443 from anywhere**. Let's Encrypt connects from many IPs.
-- `DOMAIN` in `/srv/basketwise/basketwise.env` must be exactly `basketwise.aryannaveen.com`.
 - Don't delete the `caddy_data` volume. Let's Encrypt rate-limits repeated requests for the same hostname.
 
 ### The site loads but shows no products
 
-- `curl -s https://basketwise.aryannaveen.com/api/health`. A 502 means the API isn't running: `up.sh logs api`.
-- `database not found at /data/basketwise.db` means nothing has been published yet. Run Phase 7.
-- DevTools → Network: requests should go to `/api/...`. If they go to `basket.taskglass.work`, the frontend was built without `VITE_API_BASE=/api`. Re-run `frontend.sh`.
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://basketwise.aryannaveen.com/api/health; ssh basketwise 'docker logs basketwise-api 2>&1 | tail -20'
+```
+
+- A `502` means the API isn't running. `database not found at /data/basketwise.db` means nothing has been published yet: run Phase 6.
+- DevTools → Network: requests should go to `/api/...`. If they go to `basket.taskglass.work`, the frontend was built without `VITE_API_BASE=/api`. Re-run `frontend.sh` (the Day-2 deploy command does).
 
 ### The "Prices as of" strip doesn't appear
 
-`curl -s https://basketwise.aryannaveen.com/api/health | jq .data_as_of` returns `null`: the published `basketwise.db` was built by a version of `build_api_db.py` from before `data_as_of` existed. Pull the latest code and run the [rebuild](#rebuild-the-data-after-a-build-code-change).
+`curl -s https://basketwise.aryannaveen.com/api/health | jq .data_as_of` returns `null`: the published `basketwise.db` was built by a version of `build_api_db.py` from before `data_as_of` existed. Run the Day-2 deploy command, then the data rebuild command.
 
 ### Validation fails
 
 Read the reason in the `VALIDATION FAILED:` lines.
 
-- `aldi: only 0/2627 offers available`: the server's code is older than the ALDI availability fix. Pull the latest code and rebuild.
-- `only N products` with N far below 39,101: the crawl files didn't all copy. Re-run the rsync in 7.1 and check all four `hyper_*.db` files are in `~/basketwise/scraper/data/`, plus `hyper_woolworths.db-wal`.
-- `products dropped ... (>20%)` after an intentional change: delete `/srv/basketwise/state/last_build.json` once to reset the baseline.
+- `aldi: only 0/2627 offers available`: the server's code is older than the ALDI availability fix. Run the Day-2 deploy and rebuild commands.
+- `only N products` with N far below 39,101: the crawl files didn't all copy. Check with `ssh basketwise 'ls -la ~/basketwise/scraper/data/hyper_*'`: you need all four `hyper_*.db` files plus `hyper_woolworths.db-wal`. Then re-run Phase 6.
+- `products dropped ... (>20%)` after an intentional change: `ssh basketwise 'rm /srv/basketwise/state/last_build.json'` once to reset the baseline.
 
 ### The build was killed / out of memory
 
 ```bash
-sudo dmesg -T | grep -i -E 'killed process|out of memory' | tail
-swapon --show
+ssh basketwise 'sudo dmesg -T | grep -i -E "killed process|out of memory" | tail; swapon --show'
 ```
 
 Check swap is on. If it still fails, move up to `t3.small`: stop the instance → **Actions → Instance settings → Change instance type** → start. The Elastic IP stays attached.
@@ -609,8 +446,7 @@ Ubuntu 26.04's default `uutils` coreutils are meant to be drop-in replacements, 
 ### Disk filling up
 
 ```bash
-du -sh ~/basketwise/scraper/data/* | sort -h | tail
-docker system prune -f        # old images and build cache
+ssh basketwise 'du -sh ~/basketwise/scraper/data/* | sort -h | tail; docker system prune -f'
 ```
 
 ---
@@ -621,7 +457,7 @@ docker system prune -f        # old images and build cache
 - **SSH is limited to your IP**, with key-only login (Ubuntu's AMI default).
 - **The API container** runs as a non-root user, with a read-only filesystem, all Linux capabilities dropped, a 512 MB memory cap, and the database mounted read-only.
 - **Only Caddy has published ports** (80/443). The API is reachable only through it.
-- **Automatic security updates** are on (`unattended-upgrades`). Reboot now and then for kernel updates: `sudo reboot`. The containers come back on their own (`restart: unless-stopped`).
+- **Automatic security updates** are on (`unattended-upgrades`). Reboot now and then for kernel updates with `ssh basketwise sudo reboot`. The containers come back on their own (`restart: unless-stopped`).
 
 ---
 
